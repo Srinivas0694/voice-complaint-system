@@ -1,0 +1,271 @@
+// VoiceComplaintSystem — Prisma schema
+// Target: PostgreSQL 16 (Neon) with PostGIS
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")      // pooled (pgbouncer) — runtime
+  directUrl = env("DIRECT_URL")        // direct — migrations only
+}
+
+// ─────────────────────────── Enums ───────────────────────────
+
+enum UserRole {
+  ADMIN
+  TECHNICIAN
+  VIEWER
+}
+
+enum DeviceStatus {
+  PROVISIONED   // secret issued, never seen online
+  ACTIVE
+  INACTIVE      // no heartbeat within threshold
+  REVOKED       // secret burned, all requests rejected
+}
+
+enum ApplianceType {
+  AIR_CONDITIONER
+  REFRIGERATOR
+  FREEZER
+  WASHING_MACHINE
+  TELEVISION
+  WATER_PURIFIER
+  COOLER
+  MICROWAVE
+  OTHER
+}
+
+enum ComplaintStatus {
+  PROCESSING    // audio received, STT job queued
+  STT_FAILED    // transcription failed after retries; audio still available
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum GpsStatus {
+  FIX_3D
+  FIX_2D
+  NO_FIX
+  DISABLED
+  PROVISIONED   // coordinate came from the device record, not a live fix
+}
+
+// ─────────────────────────── Identity ───────────────────────────
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  fullName      String    @map("full_name")
+  role          UserRole  @default(VIEWER)
+  isActive      Boolean   @default(true) @map("is_active")
+  lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  devices          Device[]           @relation("DeviceOwner")
+  refreshTokens    RefreshToken[]
+  assignedComplaints Complaint[]      @relation("AssignedTechnician")
+  complaintEvents  ComplaintEvent[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")   // sha256 of the opaque token
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
+  userAgent  String?   @map("user_agent")
+  ipAddress  String?   @map("ip_address")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────── Fleet ───────────────────────────
+
+model Device {
+  id             String        @id @default(uuid()) @db.Uuid
+  deviceId       String        @unique @map("device_id")        // DEVICE_001, printed on the label
+  name           String                                          // "Kitchen freezer — Banjara Hills"
+  applianceType  ApplianceType @default(OTHER) @map("appliance_type")
+  applianceBrand String?       @map("appliance_brand")
+  applianceModel String?       @map("appliance_model")
+
+  // AES-256-GCM ciphertext, NOT a hash: HMAC verification needs the real secret
+  // back, so this must be reversible. Format: ivHex:tagHex:cipherHex
+  secretEnc      String        @map("secret_enc")
+  status         DeviceStatus  @default(PROVISIONED)
+
+  firmwareVersion String?      @map("firmware_version")
+  hardwareRev     String?      @map("hardware_rev")
+  macAddress      String?      @map("mac_address")
+
+  // Installation location (static), distinct from per-complaint GPS
+  siteName       String?  @map("site_name")
+  siteAddress    String?  @map("site_address")
+  latitude       Decimal? @db.Decimal(10, 7)
+  longitude      Decimal? @db.Decimal(10, 7)
+
+  // Rolling telemetry
+  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz
+  lastRssi       Int?      @map("last_rssi")
+  lastBatteryPct Int?      @map("last_battery_pct")
+  bootCount      Int       @default(0) @map("boot_count")
+
+  ownerId   String?  @map("owner_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  owner      User?       @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  complaints Complaint[]
+  heartbeats Heartbeat[]
+  nonces     DeviceNonce[]
+
+  @@index([status])
+  @@index([lastSeenAt])
+  @@index([ownerId])
+  @@map("devices")
+}
+
+model Heartbeat {
+  id           String   @id @default(uuid()) @db.Uuid
+  deviceId     String   @map("device_id") @db.Uuid
+  rssi         Int?
+  batteryPct   Int?     @map("battery_pct")
+  uptimeSec    Int?     @map("uptime_sec")
+  freeHeap     Int?     @map("free_heap")
+  firmware     String?
+  ipAddress    String?  @map("ip_address")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, createdAt])
+  @@map("heartbeats")
+}
+
+/// Replay protection for HMAC-signed device requests. A nonce may be used once
+/// inside the 300 s timestamp window. Rows older than that are disposable.
+model DeviceNonce {
+  id        String   @id @default(uuid()) @db.Uuid
+  deviceId  String   @map("device_id") @db.Uuid
+  nonce     String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, nonce])
+  @@index([createdAt])
+  @@map("device_nonces")
+}
+
+// ─────────────────────────── Complaints ───────────────────────────
+
+model Complaint {
+  id   String @id @default(uuid()) @db.Uuid
+  uuid String @unique @db.Uuid              // device-generated idempotency key
+
+  deviceId String @map("device_id") @db.Uuid
+
+  // Speech
+  audioUrl        String?  @map("audio_url")          // r2://bucket/key
+  audioDurationMs Int?     @map("audio_duration_ms")
+  audioBytes      Int?     @map("audio_bytes")
+  transcript      String?
+  language        String?                              // BCP-47, e.g. "en-IN"
+  sttProvider     String?  @map("stt_provider")
+  sttConfidence   Decimal? @map("stt_confidence") @db.Decimal(4, 3)
+  sttLatencyMs    Int?     @map("stt_latency_ms")
+
+  // Derived by the LLM enrichment pass
+  applianceType ApplianceType?  @map("appliance_type")
+  faultCategory String?         @map("fault_category")  // COOLING, NOISE, DISPLAY, LEAK, POWER, ...
+  severity      Severity?
+  summary       String?
+
+  status        ComplaintStatus @default(PROCESSING)
+  assignedToId  String?         @map("assigned_to_id") @db.Uuid
+  resolutionNote String?        @map("resolution_note")
+  resolvedAt    DateTime?       @map("resolved_at") @db.Timestamptz
+
+  // Location snapshot at complaint time
+  latitude     Decimal?  @db.Decimal(10, 7)
+  longitude    Decimal?  @db.Decimal(10, 7)
+  gpsAccuracyM Decimal?  @map("gps_accuracy_m") @db.Decimal(6, 2)
+  gpsStatus    GpsStatus @default(NO_FIX) @map("gps_status")
+  satellites   Int?
+  gpsFixedAt   DateTime? @map("gps_fixed_at") @db.Timestamptz
+
+  // Device context snapshot
+  firmwareVersion String? @map("firmware_version")
+  hardwareRev     String? @map("hardware_rev")
+  rssi            Int?
+  networkType     String? @map("network_type")   // WIFI | GSM
+  batteryPct      Int?    @map("battery_pct")
+
+  recordedAt DateTime  @map("recorded_at") @db.Timestamptz   // device clock
+  receivedAt DateTime  @default(now()) @map("received_at") @db.Timestamptz // server clock
+  raw        Json?     @db.JsonB                              // full original payload, never lost
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  device     Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  assignedTo User?            @relation("AssignedTechnician", fields: [assignedToId], references: [id], onDelete: SetNull)
+  events     ComplaintEvent[]
+
+  @@index([deviceId, receivedAt])
+  @@index([status])
+  @@index([severity])
+  @@index([receivedAt])
+  @@index([applianceType])
+  @@map("complaints")
+}
+
+model ComplaintEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  complaintId String   @map("complaint_id") @db.Uuid
+  type        String                        // CREATED, STT_COMPLETED, STATUS_CHANGED, ASSIGNED, NOTE
+  message     String?
+  metadata    Json?    @db.JsonB
+  actorId     String?  @map("actor_id") @db.Uuid   // null = system
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  actor     User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([complaintId, createdAt])
+  @@map("complaint_events")
+}
+
+// ─────────────────────────── OTA ───────────────────────────
+
+model FirmwareRelease {
+  id           String   @id @default(uuid()) @db.Uuid
+  version      String   @unique          // semver, e.g. 1.2.0
+  binaryUrl    String   @map("binary_url")
+  sha256       String
+  sizeBytes    Int      @map("size_bytes")
+  releaseNotes String?  @map("release_notes")
+  isMandatory  Boolean  @default(false) @map("is_mandatory")
+  rolloutPct   Int      @default(0) @map("rollout_pct")   // staged rollout 0–100
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("firmware_releases")
+}

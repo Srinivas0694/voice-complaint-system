@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Two-temperature palette. The product exists because appliances fail thermally:
+  freezers stop cooling, motors overheat. Frost carries the interface; ember
+  through crit carries severity. Nothing else is allowed to be warm.
+*/
+:root {
+  --void:   #0B1418;
+  --panel:  #101F26;
+  --raised: #162C35;
+  --line:   #1E3A45;
+  --ink:    #E8F2F1;
+  --mist:   #7F9AA3;
+  --frost:  #63D8C4;
+  --ember:  #FF8B4A;
+  --crit:   #FF5F56;
+
+  --font-display: 'Bricolage Grotesque', system-ui;
+  --font-body:    'Poppins', system-ui;
+  --font-mono:    'JetBrains Mono', monospace;
+}
+
+:root.light {
+  --void:   #EDF3F3;
+  --panel:  #FFFFFF;
+  --raised: #F4F8F8;
+  --line:   #D6E2E2;
+  --ink:    #0C1A1F;
+  --mist:   #5A727A;
+  --frost:  #12897A;
+  --ember:  #C4551B;
+  --crit:   #C8362D;
+}
+
+html, body { background: var(--void); color: var(--ink); }
+body { font-family: var(--font-body); -webkit-font-smoothing: antialiased; }
+
+::selection { background: var(--frost); color: var(--void); }
+
+/* Visible keyboard focus everywhere, without the default ring on mouse clicks. */
+:focus-visible { outline: 2px solid var(--frost); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.hairline { border-color: var(--line); }
+
+/* Severity temperature bar — the left edge of every complaint row. */
+.temp-LOW      { background: var(--frost); }
+.temp-MEDIUM   { background: #E8C468; }
+.temp-HIGH     { background: var(--ember); }
+.temp-CRITICAL { background: var(--crit); }
+.temp-UNSET    { background: var(--line); }
