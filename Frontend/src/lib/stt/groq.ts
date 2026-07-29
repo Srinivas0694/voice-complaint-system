@@ -7,7 +7,7 @@ import type { SttProvider, SttResult } from './types';
  * the complaint lands untriaged but readable. A degraded ticket beats no ticket.
  */
 export class GroqSttProvider implements SttProvider {
-  readonly name = 'groq-whisper-large-v3-turbo';
+  readonly name = 'groq-whisper-large-v3-translate';
 
   isConfigured() { return env.GROQ_API_KEY.length > 0; }
 
@@ -16,11 +16,15 @@ export class GroqSttProvider implements SttProvider {
 
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'complaint.wav');
-    form.append('model', 'whisper-large-v3-turbo');
+    // whisper-large-v3 (not turbo) — the translation endpoint needs the full
+    // model. Output is always English regardless of what was spoken, which
+    // handles code-mixed Telugu/English cleanly and avoids the auto-detector
+    // guessing the wrong script.
+    form.append('model', 'whisper-large-v3');
     form.append('response_format', 'json');
     form.append('temperature', '0');
 
-    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+    const res = await fetch('https://api.groq.com/openai/v1/audio/translations', {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
       body: form,
